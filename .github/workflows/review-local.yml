@@ -1,0 +1,123 @@
+name: review-local
+run-name: "review branch ${{ inputs.branch }}"
+
+permissions: {}
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch name"
+        required: true
+        type: string
+      x86_64-linux:
+        description: "Run on x86_64-linux"
+        required: true
+        type: boolean
+        default: true
+      aarch64-linux:
+        description: "Run on aarch64-linux"
+        required: true
+        type: boolean
+        default: true
+      x86_64-darwin:
+        description: "Run on x86_64-darwin"
+        required: true
+        type: choice
+        default: yes_sandbox_relaxed
+        options:
+          - "no"
+          - yes_sandbox_false
+          - yes_sandbox_relaxed
+          - yes_sandbox_true
+      aarch64-darwin:
+        description: "Run on aarch64-darwin"
+        required: true
+        type: choice
+        default: yes_sandbox_relaxed
+        options:
+          - "no"
+          - yes_sandbox_false
+          - yes_sandbox_relaxed
+          - yes_sandbox_true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      pr: ${{ steps.pr.outputs.pr }}
+      head: ${{ steps.pr.outputs.head }}
+      merge: ${{ steps.pr.outputs.merge }}
+      author_id: ${{ steps.pr.outputs.author_id }}
+
+    steps:
+      - name: display inputs
+        run: echo "$INPUTS"
+        env:
+          INPUTS: "${{ toJSON(github.event.inputs) }}"
+
+  review:
+    needs: [prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        system:
+          - x86_64-linux
+          - aarch64-linux
+          - x86_64-darwin
+          - aarch64-darwin
+        exclude:
+          - system: ${{ !inputs.x86_64-linux && 'x86_64-linux' || '' }}
+          - system: ${{ !inputs.aarch64-linux && 'aarch64-linux' || '' }}
+          - system: ${{ inputs.x86_64-darwin == 'no' && 'x86_64-darwin' || '' }}
+          - system: ${{ inputs.aarch64-darwin == 'no' && 'aarch64-darwin' || '' }}
+    runs-on: >-
+      ${{ (matrix.system == 'x86_64-linux' && 'ubuntu-latest')
+      || (matrix.system == 'aarch64-linux' && 'ubuntu-24.04-arm')
+      || (matrix.system == 'x86_64-darwin' && 'macos-latest')
+      || (matrix.system == 'aarch64-darwin' && 'macos-latest') }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            .github/actions
+            flake.lock
+            flake.nix
+
+      - name: setup nix
+        uses: ./.github/actions/setup-nix
+        with:
+          extra-nix-config: ${{ vars.EXTRA_NIX_CONFIG }}
+          system: ${{ matrix.system }}
+          sandbox: ${{
+            (matrix.system == 'x86_64-darwin' && inputs.x86_64-darwin == 'yes_sandbox_false'
+            || matrix.system == 'aarch64-darwin' && inputs.aarch64-darwin == 'yes_sandbox_false') && 'false'
+            || (matrix.system == 'x86_64-darwin' && inputs.x86_64-darwin == 'yes_sandbox_relaxed'
+            || matrix.system == 'aarch64-darwin' && inputs.aarch64-darwin == 'yes_sandbox_relaxed') && 'relaxed'
+            || 'true' }}
+
+      - name: install packages
+        run: |
+          pkgs=(coreutils nixpkgs-review jq gnused)
+          nix profile add "${pkgs[@]/#/.#}"
+
+      - name: clone nixpkgs
+        uses: actions/checkout@v6
+        with:
+          repository: nicomem/nixpkgs
+          ref: ${{ inputs.branch }}
+          path: nixpkgs
+          persist-credentials: false
+
+      - name: run nixpkgs-review
+        run: |
+          nixpkgs-review -- \
+            rev HEAD \
+            --no-shell \
+            --no-exit-status \
+            --print-result \
+            --build-args="-L"
+        working-directory: nixpkgs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
